@@ -7,25 +7,53 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Function to clean YouTube URLs (remove playlist, radio, etc.)
+function cleanYouTubeUrl(url) {
+    let videoId = null;
+    
+    // Handle youtu.be format
+    if (url.includes('youtu.be')) {
+        videoId = url.split('/').pop().split('?')[0];
+    } 
+    // Handle youtube.com format
+    else if (url.includes('youtube.com')) {
+        const match = url.match(/[?&]v=([^&]+)/);
+        if (match) videoId = match[1];
+    }
+    
+    if (videoId) {
+        // Return a clean URL with just the video ID
+        return `https://www.youtube.com/watch?v=${videoId}`;
+    }
+    
+    return url;
+}
+
 // Test endpoint
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Main info endpoint - Simplified to avoid crashes
+// Main info endpoint
 app.get('/api/info', async (req, res) => {
-    const { url } = req.query;
+    let { url } = req.query;
     
-    console.log('Received request for URL:', url);
+    console.log('Original URL:', url);
     
     if (!url) {
         return res.status(400).json({ error: 'No URL provided' });
     }
     
+    // Clean YouTube URLs before processing
+    if (url.includes('youtube.com') || url.includes('youtu.be')) {
+        url = cleanYouTubeUrl(url);
+        console.log('Cleaned URL:', url);
+    }
+    
     try {
         // Handle YouTube URLs
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // Extract video ID
+            // Extract video ID from cleaned URL
             let videoId = null;
             if (url.includes('youtu.be')) {
                 videoId = url.split('/').pop().split('?')[0];
@@ -40,7 +68,7 @@ app.get('/api/info', async (req, res) => {
             
             console.log('YouTube video ID:', videoId);
             
-            // Use a public API that definitely works
+            // Use the public API with just the video ID
             const apiUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
             const response = await axios.get(apiUrl, {
                 timeout: 15000,
@@ -52,7 +80,6 @@ app.get('/api/info', async (req, res) => {
             // Build formats array safely
             const formats = [];
             
-            // Add video streams if they exist
             if (data.videoStreams && Array.isArray(data.videoStreams)) {
                 data.videoStreams.forEach(stream => {
                     if (stream.url && stream.quality) {
@@ -65,12 +92,10 @@ app.get('/api/info', async (req, res) => {
                 });
             }
             
-            // If no formats found, provide defaults
             if (formats.length === 0) {
                 formats.push(
                     { quality: '360p', format: 'mp4', size: 'Unknown' },
-                    { quality: '720p', format: 'mp4', size: 'Unknown' },
-                    { quality: '1080p', format: 'mp4', size: 'Unknown' }
+                    { quality: '720p', format: 'mp4', size: 'Unknown' }
                 );
             }
             
@@ -78,14 +103,13 @@ app.get('/api/info', async (req, res) => {
                 title: data.title || 'YouTube Video',
                 thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
                 platform: 'youtube',
-                formats: formats.slice(0, 8) // Limit to 8 formats
+                formats: formats.slice(0, 8)
             };
             
-            console.log('Sending response with', formats.length, 'formats');
+            console.log('Success! Sending', formats.length, 'formats');
             res.json(result);
         }
         else {
-            // For non-YouTube URLs
             res.json({
                 title: 'Video Link',
                 thumbnail: '',
@@ -95,26 +119,29 @@ app.get('/api/info', async (req, res) => {
         }
         
     } catch (error) {
-        console.error('Error details:', error.message);
+        console.error('Error:', error.message);
         res.status(500).json({ 
             error: error.message,
-            hint: 'Make sure the video URL is valid and accessible'
+            hint: 'Try using a simple YouTube URL without playlist parameters'
         });
     }
 });
 
 // Download endpoint
 app.get('/api/download', async (req, res) => {
-    const { url } = req.query;
+    let { url } = req.query;
     
     if (!url) {
         return res.status(400).json({ error: 'No URL provided' });
     }
     
+    // Clean YouTube URLs
+    if (url.includes('youtube.com') || url.includes('youtu.be')) {
+        url = cleanYouTubeUrl(url);
+    }
+    
     try {
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // For now, provide a direct download link using a public service
-            // Extract video ID
             let videoId = null;
             if (url.includes('youtu.be')) {
                 videoId = url.split('/').pop().split('?')[0];
@@ -124,18 +151,16 @@ app.get('/api/download', async (req, res) => {
             }
             
             if (videoId) {
-                // Use a public download service
-                const downloadUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
-                const response = await axios.get(downloadUrl);
+                const apiUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
+                const response = await axios.get(apiUrl);
                 const videoStream = response.data.videoStreams?.find(s => s.quality === '720p' || s.quality === '360p');
                 
                 if (videoStream && videoStream.url) {
-                    // Redirect to the actual video URL
                     res.redirect(videoStream.url);
                 } else {
                     res.json({ 
                         downloadUrl: `https://www.youtube.com/watch?v=${videoId}`,
-                        note: 'Direct download requires backend with ytdl-core. Video will open in new tab.'
+                        note: 'Open this link and right-click to save video'
                     });
                 }
             } else {
@@ -153,5 +178,4 @@ app.get('/api/download', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
-    console.log(`✅ Test with: https://your-backend.onrender.com/api/health`);
 });

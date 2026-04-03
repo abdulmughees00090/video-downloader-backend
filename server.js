@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -8,6 +8,47 @@ const app = express();
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+// ─── Install yt-dlp + ffmpeg at startup if missing ───────────────────────────
+const YT_DLP = '/usr/local/bin/yt-dlp';
+
+function ensureDependencies() {
+    // Install ffmpeg (needed to merge separate video+audio streams)
+    try {
+        execSync('which ffmpeg', { stdio: 'ignore' });
+        console.log('✅ ffmpeg already available');
+    } catch (_) {
+        console.log('📦 Installing ffmpeg...');
+        try {
+            execSync('apt-get update -qq && apt-get install -y ffmpeg', { stdio: 'inherit' });
+            console.log('✅ ffmpeg installed');
+        } catch (e) {
+            console.warn('⚠️  Could not install ffmpeg:', e.message);
+        }
+    }
+
+    // Install / update yt-dlp
+    try {
+        execSync(`${YT_DLP} --version`, { stdio: 'ignore' });
+        console.log('✅ yt-dlp already available');
+        // Keep it fresh — YouTube regularly breaks older versions
+        execSync(`${YT_DLP} -U`, { stdio: 'ignore' });
+    } catch (_) {
+        console.log('📦 Installing yt-dlp...');
+        try {
+            execSync(
+                `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${YT_DLP} && chmod a+rx ${YT_DLP}`,
+                { stdio: 'inherit' }
+            );
+            console.log('✅ yt-dlp installed');
+        } catch (e) {
+            console.error('❌ Failed to install yt-dlp:', e.message);
+        }
+    }
+}
+
+ensureDependencies();
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Extract YouTube video ID
 function extractVideoId(url) {
@@ -54,7 +95,7 @@ app.get('/api/info', async (req, res) => {
             throw new Error('Invalid YouTube URL');
         }
 
-        exec(`yt-dlp -j "https://www.youtube.com/watch?v=${videoId}"`, (error, stdout) => {
+        exec(`${YT_DLP} -j "https://www.youtube.com/watch?v=${videoId}"`, (error, stdout) => {
             if (error) {
                 return res.status(500).json({ error: 'Failed to fetch video info' });
             }
@@ -122,7 +163,7 @@ app.get('/api/download', (req, res) => {
         : qualityToFormat(quality);
 
     const safeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const command = `yt-dlp -f "${formatSelector}" --merge-output-format mp4 -o "${outputPath}" "${safeUrl}"`;
+    const command = `${YT_DLP} -f "${formatSelector}" --merge-output-format mp4 -o "${outputPath}" "${safeUrl}"`;
 
     console.log(`Downloading: ${command}`);
 

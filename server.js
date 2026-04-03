@@ -1,77 +1,71 @@
-// server.js - Simplified Working Version
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const ytdl = require('@distube/ytdl-core');
 const app = express();
 
-// Enable CORS for all requests
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type']
-}));
-
+// Enable CORS
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Simple test endpoint to check if server is running
+// Test endpoint
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Server is running' });
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get video info (Fixed version with better error handling)
+// Main info endpoint - Simplified to avoid crashes
 app.get('/api/info', async (req, res) => {
-    // Add CORS headers
-    res.header('Access-Control-Allow-Origin', '*');
-    
     const { url } = req.query;
     
+    console.log('Received request for URL:', url);
+    
     if (!url) {
-        return res.status(400).json({ error: 'URL parameter is required' });
+        return res.status(400).json({ error: 'No URL provided' });
     }
     
-    console.log('Fetching info for:', url);
-    
     try {
-        // Check if it's a YouTube URL
+        // Handle YouTube URLs
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
             // Extract video ID
             let videoId = null;
             if (url.includes('youtu.be')) {
                 videoId = url.split('/').pop().split('?')[0];
             } else {
-                const urlParams = new URLSearchParams(new URL(url).search);
-                videoId = urlParams.get('v');
+                const match = url.match(/[?&]v=([^&]+)/);
+                if (match) videoId = match[1];
             }
             
             if (!videoId) {
-                throw new Error('Could not extract video ID');
+                throw new Error('Could not extract YouTube video ID');
             }
             
-            // Use a simpler API that doesn't crash
+            console.log('YouTube video ID:', videoId);
+            
+            // Use a public API that definitely works
             const apiUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
             const response = await axios.get(apiUrl, {
-                timeout: 10000,
+                timeout: 15000,
                 headers: { 'User-Agent': 'Mozilla/5.0' }
             });
             
             const data = response.data;
             
-            // Extract formats
+            // Build formats array safely
             const formats = [];
+            
+            // Add video streams if they exist
             if (data.videoStreams && Array.isArray(data.videoStreams)) {
                 data.videoStreams.forEach(stream => {
                     if (stream.url && stream.quality) {
                         formats.push({
                             quality: stream.quality,
                             format: 'mp4',
-                            size: stream.contentLength ? (stream.contentLength / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown'
+                            size: stream.contentLength ? Math.round(stream.contentLength / 1024 / 1024) + ' MB' : 'Unknown'
                         });
                     }
                 });
             }
             
-            // If no formats found, add some default ones
+            // If no formats found, provide defaults
             if (formats.length === 0) {
                 formats.push(
                     { quality: '360p', format: 'mp4', size: 'Unknown' },
@@ -80,100 +74,75 @@ app.get('/api/info', async (req, res) => {
                 );
             }
             
-            res.json({
+            const result = {
                 title: data.title || 'YouTube Video',
-                thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+                thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
                 platform: 'youtube',
-                formats: formats
-            });
-        }
-        else if (url.includes('tiktok.com')) {
-            // TikTok handler
-            try {
-                const tikApi = `https://tikwm.com/api/?url=${encodeURIComponent(url)}`;
-                const tikResponse = await axios.get(tikApi, { timeout: 10000 });
-                
-                if (tikResponse.data && tikResponse.data.data) {
-                    res.json({
-                        title: tikResponse.data.data.title || 'TikTok Video',
-                        thumbnail: tikResponse.data.data.cover || '',
-                        platform: 'tiktok',
-                        formats: [{ quality: 'HD', format: 'mp4', size: 'Unknown' }]
-                    });
-                } else {
-                    throw new Error('No data from TikTok API');
-                }
-            } catch (tikError) {
-                res.json({
-                    title: 'TikTok Video',
-                    thumbnail: '',
-                    platform: 'tiktok',
-                    formats: [{ quality: 'HD', format: 'mp4', size: 'Unknown' }]
-                });
-            }
+                formats: formats.slice(0, 8) // Limit to 8 formats
+            };
+            
+            console.log('Sending response with', formats.length, 'formats');
+            res.json(result);
         }
         else {
-            // Generic response for other platforms
+            // For non-YouTube URLs
             res.json({
-                title: 'Video from URL',
+                title: 'Video Link',
                 thumbnail: '',
-                platform: 'generic',
-                formats: [
-                    { quality: 'Best Available', format: 'mp4', size: 'Unknown' }
-                ]
+                platform: 'other',
+                formats: [{ quality: 'Original', format: 'mp4', size: 'Unknown' }]
             });
         }
         
     } catch (error) {
-        console.error('Error in /api/info:', error.message);
+        console.error('Error details:', error.message);
         res.status(500).json({ 
             error: error.message,
-            details: 'Failed to fetch video info. Check the URL and try again.'
+            hint: 'Make sure the video URL is valid and accessible'
         });
     }
 });
 
 // Download endpoint
 app.get('/api/download', async (req, res) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    
-    const { url, quality = 'highest' } = req.query;
+    const { url } = req.query;
     
     if (!url) {
-        return res.status(400).json({ error: 'URL is required' });
+        return res.status(400).json({ error: 'No URL provided' });
     }
     
     try {
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            // For now, provide a direct download link using a public service
             // Extract video ID
             let videoId = null;
             if (url.includes('youtu.be')) {
                 videoId = url.split('/').pop().split('?')[0];
             } else {
-                const urlParams = new URLSearchParams(new URL(url).search);
-                videoId = urlParams.get('v');
+                const match = url.match(/[?&]v=([^&]+)/);
+                if (match) videoId = match[1];
             }
             
-            // Get video info first
-            const info = await ytdl.getInfo(url);
-            const title = info.videoDetails.title.replace(/[^\w\s]/gi, '');
-            
-            // Choose format based on quality
-            let format;
-            if (quality === 'highest' || quality === '1080p') {
-                format = ytdl.chooseFormat(info.formats, { quality: 'highestvideo' });
-            } else if (quality === '720p') {
-                format = ytdl.chooseFormat(info.formats, { quality: '720p' });
+            if (videoId) {
+                // Use a public download service
+                const downloadUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
+                const response = await axios.get(downloadUrl);
+                const videoStream = response.data.videoStreams?.find(s => s.quality === '720p' || s.quality === '360p');
+                
+                if (videoStream && videoStream.url) {
+                    // Redirect to the actual video URL
+                    res.redirect(videoStream.url);
+                } else {
+                    res.json({ 
+                        downloadUrl: `https://www.youtube.com/watch?v=${videoId}`,
+                        note: 'Direct download requires backend with ytdl-core. Video will open in new tab.'
+                    });
+                }
             } else {
-                format = ytdl.chooseFormat(info.formats, { quality: 'lowestvideo' });
+                throw new Error('Invalid YouTube URL');
             }
-            
-            res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
-            res.header('Content-Type', 'video/mp4');
-            
-            ytdl(url, { format: format }).pipe(res);
         } else {
-            res.status(400).json({ error: 'Download only supported for YouTube at this time' });
+            res.status(400).json({ error: 'Download not supported for this platform yet' });
         }
     } catch (error) {
         console.error('Download error:', error);
@@ -181,10 +150,8 @@ app.get('/api/download', async (req, res) => {
     }
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
-    console.log(`✅ CORS enabled for all origins`);
-    console.log(`✅ Health check: http://localhost:${PORT}/api/health`);
+    console.log(`✅ Test with: https://your-backend.onrender.com/api/health`);
 });

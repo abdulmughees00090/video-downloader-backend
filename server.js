@@ -6,7 +6,11 @@ const ytdl = require('@distube/ytdl-core');
 const { TwitterApi } = require('twitter-api-v2');
 const app = express();
 
-app.use(cors());
+//app.use(cors());
+app.use(cors({
+    origin: ['https://anydown.silverfoxdynamics.com', 'http://localhost:3000'],
+    credentials: true
+}));
 app.use(express.json());
 
 // YouTube Downloader

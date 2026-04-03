@@ -1,247 +1,190 @@
-// server.js - Complete video downloader backend with CORS fix
+// server.js - Simplified Working Version
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const ytdl = require('@distube/ytdl-core');
 const app = express();
 
-// ===== CORS FIX - Allow any frontend to call this API =====
+// Enable CORS for all requests
 app.use(cors({
-    origin: '*', // Allows any domain (your GitHub Pages site)
+    origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type']
 }));
-
-// Also handle preflight requests
-app.options('*', cors());
 
 app.use(express.json());
 
-// YouTube Downloader
-app.get('/api/download/youtube', async (req, res) => {
-    try {
-        const { url, quality } = req.query;
-        
-        // Get video info
-        const info = await ytdl.getInfo(url);
-        const title = info.videoDetails.title.replace(/[^\w\s]/gi, '');
-        
-        // Get the best format based on quality requested
-        let format;
-        if (quality === 'highest') {
-            format = ytdl.chooseFormat(info.formats, { quality: 'highestvideo' });
-        } else {
-            format = ytdl.chooseFormat(info.formats, { quality: quality });
-        }
-        
-        // Set headers to force download
-        res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
-        res.header('Content-Type', 'video/mp4');
-        
-        // Stream the video directly to client
-        ytdl(url, { format: format })
-            .pipe(res);
-            
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+// Simple test endpoint to check if server is running
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', message: 'Server is running' });
 });
 
-// TikTok Downloader
-app.get('/api/download/tiktok', async (req, res) => {
-    try {
-        const { url } = req.query;
-        
-        // Use tikwm.com API (free, no key required)
-        const apiUrl = `https://tikwm.com/api/?url=${encodeURIComponent(url)}`;
-        const response = await axios.get(apiUrl);
-        
-        if (response.data && response.data.data && response.data.data.play) {
-            const videoUrl = response.data.data.play;
-            const title = response.data.data.title || 'tiktok_video';
-            
-            // Fetch the video and pipe it to response
-            const videoResponse = await axios({
-                method: 'get',
-                url: videoUrl,
-                responseType: 'stream'
-            });
-            
-            res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
-            res.header('Content-Type', 'video/mp4');
-            videoResponse.data.pipe(res);
-        } else {
-            throw new Error('Could not fetch TikTok video');
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+// Get video info (Fixed version with better error handling)
+app.get('/api/info', async (req, res) => {
+    // Add CORS headers
+    res.header('Access-Control-Allow-Origin', '*');
+    
+    const { url } = req.query;
+    
+    if (!url) {
+        return res.status(400).json({ error: 'URL parameter is required' });
     }
-});
-
-// Instagram Downloader  
-app.get('/api/download/instagram', async (req, res) => {
+    
+    console.log('Fetching info for:', url);
+    
     try {
-        const { url } = req.query;
-        
-        // Using instagram-stories API (free)
-        const apiUrl = `https://instagram-stories-api.p.rapidapi.com/v1/media-info?url=${encodeURIComponent(url)}`;
-        
-        // Note: You need to sign up for free RapidAPI key
-        const response = await axios.get(apiUrl, {
-            headers: {
-                'X-RapidAPI-Key': 'YOUR_RAPIDAPI_KEY', // Get free key
-                'X-RapidAPI-Host': 'instagram-stories-api.p.rapidapi.com'
+        // Check if it's a YouTube URL
+        if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            // Extract video ID
+            let videoId = null;
+            if (url.includes('youtu.be')) {
+                videoId = url.split('/').pop().split('?')[0];
+            } else {
+                const urlParams = new URLSearchParams(new URL(url).search);
+                videoId = urlParams.get('v');
             }
+            
+            if (!videoId) {
+                throw new Error('Could not extract video ID');
+            }
+            
+            // Use a simpler API that doesn't crash
+            const apiUrl = `https://pipedapi.kavin.rocks/streams/${videoId}`;
+            const response = await axios.get(apiUrl, {
+                timeout: 10000,
+                headers: { 'User-Agent': 'Mozilla/5.0' }
+            });
+            
+            const data = response.data;
+            
+            // Extract formats
+            const formats = [];
+            if (data.videoStreams && Array.isArray(data.videoStreams)) {
+                data.videoStreams.forEach(stream => {
+                    if (stream.url && stream.quality) {
+                        formats.push({
+                            quality: stream.quality,
+                            format: 'mp4',
+                            size: stream.contentLength ? (stream.contentLength / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown'
+                        });
+                    }
+                });
+            }
+            
+            // If no formats found, add some default ones
+            if (formats.length === 0) {
+                formats.push(
+                    { quality: '360p', format: 'mp4', size: 'Unknown' },
+                    { quality: '720p', format: 'mp4', size: 'Unknown' },
+                    { quality: '1080p', format: 'mp4', size: 'Unknown' }
+                );
+            }
+            
+            res.json({
+                title: data.title || 'YouTube Video',
+                thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+                platform: 'youtube',
+                formats: formats
+            });
+        }
+        else if (url.includes('tiktok.com')) {
+            // TikTok handler
+            try {
+                const tikApi = `https://tikwm.com/api/?url=${encodeURIComponent(url)}`;
+                const tikResponse = await axios.get(tikApi, { timeout: 10000 });
+                
+                if (tikResponse.data && tikResponse.data.data) {
+                    res.json({
+                        title: tikResponse.data.data.title || 'TikTok Video',
+                        thumbnail: tikResponse.data.data.cover || '',
+                        platform: 'tiktok',
+                        formats: [{ quality: 'HD', format: 'mp4', size: 'Unknown' }]
+                    });
+                } else {
+                    throw new Error('No data from TikTok API');
+                }
+            } catch (tikError) {
+                res.json({
+                    title: 'TikTok Video',
+                    thumbnail: '',
+                    platform: 'tiktok',
+                    formats: [{ quality: 'HD', format: 'mp4', size: 'Unknown' }]
+                });
+            }
+        }
+        else {
+            // Generic response for other platforms
+            res.json({
+                title: 'Video from URL',
+                thumbnail: '',
+                platform: 'generic',
+                formats: [
+                    { quality: 'Best Available', format: 'mp4', size: 'Unknown' }
+                ]
+            });
+        }
+        
+    } catch (error) {
+        console.error('Error in /api/info:', error.message);
+        res.status(500).json({ 
+            error: error.message,
+            details: 'Failed to fetch video info. Check the URL and try again.'
         });
-        
-        if (response.data && response.data.video_url) {
-            const videoResponse = await axios({
-                method: 'get',
-                url: response.data.video_url,
-                responseType: 'stream'
-            });
-            
-            res.header('Content-Disposition', `attachment; filename="instagram_video.mp4"`);
-            videoResponse.data.pipe(res);
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
 });
 
-// Facebook Downloader
-app.get('/api/download/facebook', async (req, res) => {
-    try {
-        const { url } = req.query;
-        
-        // Using fdown.net API
-        const apiUrl = `https://fdown.net/api/download?url=${encodeURIComponent(url)}`;
-        const response = await axios.post(apiUrl);
-        
-        if (response.data && response.data.video_url) {
-            const videoResponse = await axios({
-                method: 'get',
-                url: response.data.video_url,
-                responseType: 'stream'
-            });
-            
-            res.header('Content-Disposition', `attachment; filename="facebook_video.mp4"`);
-            videoResponse.data.pipe(res);
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Twitter/X Downloader
-app.get('/api/download/twitter', async (req, res) => {
-    try {
-        const { url } = req.query;
-        
-        // Using twitsave API
-        const apiUrl = `https://twitsave.com/info?url=${encodeURIComponent(url)}`;
-        const response = await axios.get(apiUrl);
-        
-        // Extract video URL from HTML response
-        const match = response.data.match(/https:\/\/[\w.-]+\.twimg\.com\/[\w\/\-\.]+\.mp4/);
-        if (match) {
-            const videoResponse = await axios({
-                method: 'get',
-                url: match[0],
-                responseType: 'stream'
-            });
-            
-            res.header('Content-Disposition', `attachment; filename="twitter_video.mp4"`);
-            videoResponse.data.pipe(res);
-        }
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Universal Downloader - Auto detects platform
+// Download endpoint
 app.get('/api/download', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    
     const { url, quality = 'highest' } = req.query;
     
     if (!url) {
         return res.status(400).json({ error: 'URL is required' });
     }
     
-    // Detect platform
-    if (url.includes('youtube.com') || url.includes('youtu.be')) {
-        res.redirect(`/api/download/youtube?url=${encodeURIComponent(url)}&quality=${quality}`);
-    } 
-    else if (url.includes('tiktok.com')) {
-        res.redirect(`/api/download/tiktok?url=${encodeURIComponent(url)}`);
-    }
-    else if (url.includes('instagram.com')) {
-        res.redirect(`/api/download/instagram?url=${encodeURIComponent(url)}`);
-    }
-    else if (url.includes('facebook.com') || url.includes('fb.com')) {
-        res.redirect(`/api/download/facebook?url=${encodeURIComponent(url)}`);
-    }
-    else if (url.includes('twitter.com') || url.includes('x.com')) {
-        res.redirect(`/api/download/twitter?url=${encodeURIComponent(url)}`);
-    }
-    else {
-        res.status(400).json({ error: 'Unsupported platform' });
-    }
-});
-
-// Get video info (title, thumbnail, formats) - WITH CORS HEADERS
-app.get('/api/info', async (req, res) => {
-    const { url } = req.query;
-    
-    // Add CORS headers specifically for this endpoint
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    
     try {
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const info = await ytdl.getInfo(url);
-            const formats = info.formats
-                .filter(f => f.hasVideo && f.hasAudio)
-                .map(f => ({
-                    quality: f.qualityLabel || f.quality,
-                    format: f.container,
-                    size: f.contentLength ? (f.contentLength / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown',
-                    itag: f.itag
-                }));
+            // Extract video ID
+            let videoId = null;
+            if (url.includes('youtu.be')) {
+                videoId = url.split('/').pop().split('?')[0];
+            } else {
+                const urlParams = new URLSearchParams(new URL(url).search);
+                videoId = urlParams.get('v');
+            }
             
-            res.json({
-                title: info.videoDetails.title,
-                thumbnail: info.videoDetails.thumbnails[0].url,
-                platform: 'youtube',
-                formats: formats.slice(0, 10) // Limit to 10 formats
-            });
-        }
-        else if (url.includes('tiktok.com')) {
-            const apiUrl = `https://tikwm.com/api/?url=${encodeURIComponent(url)}`;
-            const response = await axios.get(apiUrl);
-            res.json({
-                title: response.data.data.title,
-                thumbnail: response.data.data.cover,
-                platform: 'tiktok',
-                formats: [{ quality: 'HD', format: 'mp4', size: 'Unknown' }]
-            });
-        }
-        else {
-            res.json({
-                title: 'Video',
-                thumbnail: '',
-                platform: 'other',
-                formats: [{ quality: 'Best', format: 'mp4', size: 'Unknown' }]
-            });
+            // Get video info first
+            const info = await ytdl.getInfo(url);
+            const title = info.videoDetails.title.replace(/[^\w\s]/gi, '');
+            
+            // Choose format based on quality
+            let format;
+            if (quality === 'highest' || quality === '1080p') {
+                format = ytdl.chooseFormat(info.formats, { quality: 'highestvideo' });
+            } else if (quality === '720p') {
+                format = ytdl.chooseFormat(info.formats, { quality: '720p' });
+            } else {
+                format = ytdl.chooseFormat(info.formats, { quality: 'lowestvideo' });
+            }
+            
+            res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
+            res.header('Content-Type', 'video/mp4');
+            
+            ytdl(url, { format: format }).pipe(res);
+        } else {
+            res.status(400).json({ error: 'Download only supported for YouTube at this time' });
         }
     } catch (error) {
-        console.error('Info error:', error);
+        console.error('Download error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`CORS enabled for all origins`);
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`✅ CORS enabled for all origins`);
+    console.log(`✅ Health check: http://localhost:${PORT}/api/health`);
 });

@@ -1,9 +1,13 @@
 FROM node:18
 
-# Install yt-dlp using pip (works on Debian)
-RUN apt-get update && apt-get install -y python3 python3-pip && \
-    pip3 install yt-dlp && \
-    apt-get clean
+# Install Python and curl, then download yt-dlp binary directly
+RUN apt-get update && apt-get install -y \
+    python3 \
+    curl \
+    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

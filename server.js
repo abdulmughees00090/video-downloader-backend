@@ -1,16 +1,20 @@
-// server.js - Complete video downloader backend
+// server.js - Complete video downloader backend with CORS fix
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const ytdl = require('@distube/ytdl-core');
-const { TwitterApi } = require('twitter-api-v2');
 const app = express();
 
-//app.use(cors());
+// ===== CORS FIX - Allow any frontend to call this API =====
 app.use(cors({
-    origin: ['https://anydown.silverfoxdynamics.com', 'http://localhost:3000'],
-    credentials: true
+    origin: '*', // Allows any domain (your GitHub Pages site)
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Also handle preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 
 // YouTube Downloader
@@ -74,7 +78,7 @@ app.get('/api/download/tiktok', async (req, res) => {
     }
 });
 
-// Instagram Downloader
+// Instagram Downloader  
 app.get('/api/download/instagram', async (req, res) => {
     try {
         const { url } = req.query;
@@ -83,7 +87,6 @@ app.get('/api/download/instagram', async (req, res) => {
         const apiUrl = `https://instagram-stories-api.p.rapidapi.com/v1/media-info?url=${encodeURIComponent(url)}`;
         
         // Note: You need to sign up for free RapidAPI key
-        // Replace with your key from https://rapidapi.com/rockethearts/api/instagram-stories
         const response = await axios.get(apiUrl, {
             headers: {
                 'X-RapidAPI-Key': 'YOUR_RAPIDAPI_KEY', // Get free key
@@ -166,7 +169,6 @@ app.get('/api/download', async (req, res) => {
     
     // Detect platform
     if (url.includes('youtube.com') || url.includes('youtu.be')) {
-        // Redirect to YouTube handler
         res.redirect(`/api/download/youtube?url=${encodeURIComponent(url)}&quality=${quality}`);
     } 
     else if (url.includes('tiktok.com')) {
@@ -186,9 +188,14 @@ app.get('/api/download', async (req, res) => {
     }
 });
 
-// Get video info (title, thumbnail, formats)
+// Get video info (title, thumbnail, formats) - WITH CORS HEADERS
 app.get('/api/info', async (req, res) => {
     const { url } = req.query;
+    
+    // Add CORS headers specifically for this endpoint
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
     
     try {
         if (url.includes('youtube.com') || url.includes('youtu.be')) {
@@ -206,7 +213,7 @@ app.get('/api/info', async (req, res) => {
                 title: info.videoDetails.title,
                 thumbnail: info.videoDetails.thumbnails[0].url,
                 platform: 'youtube',
-                formats: formats
+                formats: formats.slice(0, 10) // Limit to 10 formats
             });
         }
         else if (url.includes('tiktok.com')) {
@@ -228,6 +235,7 @@ app.get('/api/info', async (req, res) => {
             });
         }
     } catch (error) {
+        console.error('Info error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -235,4 +243,5 @@ app.get('/api/info', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`CORS enabled for all origins`);
 });

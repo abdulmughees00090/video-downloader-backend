@@ -21,6 +21,20 @@ function extractVideoId(url) {
     return null;
 }
 
+// Map quality label to yt-dlp format selector
+function qualityToFormat(quality) {
+    const q = (quality || '').toLowerCase().replace('p', '');
+    const height = parseInt(q);
+
+    if (!isNaN(height)) {
+        // Best mp4 at or below the requested height, fallback to best available
+        return `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
+    }
+
+    // Fallback: best available mp4
+    return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+}
+
 // Health check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'Server running' });
@@ -29,28 +43,26 @@ app.get('/api/health', (req, res) => {
 // Get video info
 app.get('/api/info', async (req, res) => {
     const { url } = req.query;
-    
+
     if (!url) {
         return res.status(400).json({ error: 'No URL provided' });
     }
-    
+
     try {
         const videoId = extractVideoId(url);
         if (!videoId) {
             throw new Error('Invalid YouTube URL');
         }
-        
-        // Get video info using yt-dlp
+
         exec(`yt-dlp -j "https://www.youtube.com/watch?v=${videoId}"`, (error, stdout) => {
             if (error) {
                 return res.status(500).json({ error: 'Failed to fetch video info' });
             }
-            
+
             try {
                 const info = JSON.parse(stdout);
                 const formats = [];
-                
-                // Extract available formats
+
                 if (info.formats) {
                     info.formats.forEach(format => {
                         if (format.vcodec !== 'none' && format.acodec !== 'none') {
@@ -63,8 +75,7 @@ app.get('/api/info', async (req, res) => {
                         }
                     });
                 }
-                
-                // Remove duplicates and sort by quality
+
                 const uniqueFormats = [];
                 const seen = new Set();
                 formats.forEach(f => {
@@ -73,7 +84,7 @@ app.get('/api/info', async (req, res) => {
                         uniqueFormats.push(f);
                     }
                 });
-                
+
                 res.json({
                     title: info.title,
                     thumbnail: info.thumbnail,
@@ -89,54 +100,64 @@ app.get('/api/info', async (req, res) => {
     }
 });
 
-// REAL DOWNLOAD - Returns actual video file
-app.get('/api/download', async (req, res) => {
-    const { url, formatId } = req.query;
-    
+// DOWNLOAD endpoint — streams the video file directly to the client
+app.get('/api/download', (req, res) => {
+    const { url, quality, formatId } = req.query;
+
     if (!url) {
         return res.status(400).json({ error: 'No URL provided' });
     }
-    
+
     const videoId = extractVideoId(url);
     if (!videoId) {
         return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
-    
-    const outputPath = path.join('/tmp', `${videoId}.mp4`);
-    
-    // Build yt-dlp command
-    let command = `yt-dlp -f "best[ext=mp4]" -o "${outputPath}" "https://www.youtube.com/watch?v=${videoId}"`;
-    
-    if (formatId) {
-        command = `yt-dlp -f ${formatId} -o "${outputPath}" "https://www.youtube.com/watch?v=${videoId}"`;
-    }
-    
-    // Download the video
-    exec(command, (error, stdout, stderr) => {
+
+    // Unique temp filename to support concurrent requests
+    const outputPath = path.join('/tmp', `${videoId}_${Date.now()}.mp4`);
+
+    // Prefer explicit formatId, otherwise map quality label → yt-dlp selector
+    const formatSelector = formatId
+        ? formatId
+        : qualityToFormat(quality);
+
+    const safeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const command = `yt-dlp -f "${formatSelector}" --merge-output-format mp4 -o "${outputPath}" "${safeUrl}"`;
+
+    console.log(`Downloading: ${command}`);
+
+    exec(command, { timeout: 300000 }, (error, stdout, stderr) => {
         if (error) {
-            console.error('Download error:', error);
-            return res.status(500).json({ error: 'Failed to download video' });
+            console.error('yt-dlp error:', stderr);
+            // Clean up partial file if present
+            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+            return res.status(500).json({ error: 'Failed to download video', detail: stderr });
         }
-        
-        // Check if file exists
-        if (fs.existsSync(outputPath)) {
-            const stat = fs.statSync(outputPath);
-            res.writeHead(200, {
-                'Content-Type': 'video/mp4',
-                'Content-Length': stat.size,
-                'Content-Disposition': `attachment; filename="video_${videoId}.mp4"`
-            });
-            
-            const readStream = fs.createReadStream(outputPath);
-            readStream.pipe(res);
-            
-            // Delete file after sending
-            readStream.on('end', () => {
-                fs.unlinkSync(outputPath);
-            });
-        } else {
-            res.status(500).json({ error: 'Video file not found' });
+
+        if (!fs.existsSync(outputPath)) {
+            return res.status(500).json({ error: 'Output file not found after download' });
         }
+
+        const stat = fs.statSync(outputPath);
+        const safeTitle = `video_${videoId}_${quality || 'best'}.mp4`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+        res.writeHead(200, {
+            'Content-Type': 'video/mp4',
+            'Content-Length': stat.size,
+            'Content-Disposition': `attachment; filename="${safeTitle}"`,
+            'Cache-Control': 'no-cache'
+        });
+
+        const readStream = fs.createReadStream(outputPath);
+        readStream.pipe(res);
+
+        readStream.on('close', () => {
+            try { fs.unlinkSync(outputPath); } catch (_) {}
+        });
+
+        res.on('error', () => {
+            try { fs.unlinkSync(outputPath); } catch (_) {}
+        });
     });
 });
 

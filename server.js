@@ -3,206 +3,149 @@ const cors = require('cors');
 const { exec, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 const app = express();
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// ─── Install yt-dlp + ffmpeg at startup if missing ───────────────────────────
-const YT_DLP = '/usr/local/bin/yt-dlp';
+// ─── Tool paths (/tmp is always writable on Render free tier) ────────────────
+const YT_DLP = '/tmp/yt-dlp';
+const FFMPEG  = '/tmp/ffmpeg';
 
 function ensureDependencies() {
-    // Install ffmpeg (needed to merge separate video+audio streams)
-    try {
-        execSync('which ffmpeg', { stdio: 'ignore' });
-        console.log('✅ ffmpeg already available');
-    } catch (_) {
-        console.log('📦 Installing ffmpeg...');
-        try {
-            execSync('apt-get update -qq && apt-get install -y ffmpeg', { stdio: 'inherit' });
-            console.log('✅ ffmpeg installed');
-        } catch (e) {
-            console.warn('⚠️  Could not install ffmpeg:', e.message);
-        }
-    }
-
-    // Install / update yt-dlp
-    try {
-        execSync(`${YT_DLP} --version`, { stdio: 'ignore' });
-        console.log('✅ yt-dlp already available');
-        // Keep it fresh — YouTube regularly breaks older versions
-        execSync(`${YT_DLP} -U`, { stdio: 'ignore' });
-    } catch (_) {
-        console.log('📦 Installing yt-dlp...');
+    // ── yt-dlp ──
+    if (!fs.existsSync(YT_DLP)) {
+        console.log('📦 Downloading yt-dlp...');
         try {
             execSync(
-                `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${YT_DLP} && chmod a+rx ${YT_DLP}`,
-                { stdio: 'inherit' }
+                `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${YT_DLP} && chmod +x ${YT_DLP}`,
+                { stdio: 'inherit', timeout: 60000 }
             );
-            console.log('✅ yt-dlp installed');
+            console.log('✅ yt-dlp ready');
         } catch (e) {
-            console.error('❌ Failed to install yt-dlp:', e.message);
+            console.error('❌ yt-dlp install failed:', e.message);
         }
+    } else {
+        try { execSync(`${YT_DLP} -U`, { stdio: 'ignore', timeout: 30000 }); } catch (_) {}
+        console.log('✅ yt-dlp already present');
+    }
+
+    // ── ffmpeg ──
+    if (!fs.existsSync(FFMPEG)) {
+        try {
+            const ffmpegBin = require('@ffmpeg-installer/ffmpeg').path;
+            execSync(`cp "${ffmpegBin}" ${FFMPEG} && chmod +x ${FFMPEG}`);
+            console.log('✅ ffmpeg ready via @ffmpeg-installer');
+        } catch (_) {
+            try {
+                const sysPath = execSync('which ffmpeg').toString().trim();
+                execSync(`ln -sf "${sysPath}" ${FFMPEG}`);
+                console.log('✅ ffmpeg symlinked from system');
+            } catch (e) {
+                console.warn('⚠️  ffmpeg unavailable — high-quality merging may fail');
+            }
+        }
+    } else {
+        console.log('✅ ffmpeg already present');
     }
 }
 
 ensureDependencies();
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Extract YouTube video ID
 function extractVideoId(url) {
     if (!url) return null;
     if (url.includes('youtu.be')) {
-        const match = url.match(/youtu\.be\/([^?&]+)/);
-        if (match) return match[1];
+        const m = url.match(/youtu\.be\/([^?&]+)/);
+        if (m) return m[1];
     }
-    const match = url.match(/[?&]v=([^&]+)/);
-    if (match) return match[1];
-    return null;
+    const m = url.match(/[?&]v=([^&]+)/);
+    return m ? m[1] : null;
 }
 
-// Map quality label to yt-dlp format selector
 function qualityToFormat(quality) {
-    const q = (quality || '').toLowerCase().replace('p', '');
-    const height = parseInt(q);
-
-    if (!isNaN(height)) {
-        // Best mp4 at or below the requested height, fallback to best available
-        return `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
+    const h = parseInt((quality || '').replace(/\D/g, ''));
+    if (!isNaN(h) && h > 0) {
+        return `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`;
     }
-
-    // Fallback: best available mp4
     return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
 }
 
 // Health check
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Server running' });
+app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', ytDlp: fs.existsSync(YT_DLP), ffmpeg: fs.existsSync(FFMPEG) });
 });
 
-// Get video info
-app.get('/api/info', async (req, res) => {
+// Video info
+app.get('/api/info', (req, res) => {
     const { url } = req.query;
+    if (!url) return res.status(400).json({ error: 'No URL provided' });
+    const videoId = extractVideoId(url);
+    if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
 
-    if (!url) {
-        return res.status(400).json({ error: 'No URL provided' });
-    }
-
-    try {
-        const videoId = extractVideoId(url);
-        if (!videoId) {
-            throw new Error('Invalid YouTube URL');
+    exec(`${YT_DLP} -j "https://www.youtube.com/watch?v=${videoId}"`, { timeout: 60000 }, (err, stdout, stderr) => {
+        if (err) return res.status(500).json({ error: 'Failed to fetch video info', detail: stderr });
+        try {
+            const info = JSON.parse(stdout);
+            const seen = new Set();
+            const formats = (info.formats || [])
+                .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
+                .map(f => ({
+                    quality:  f.format_note || (f.height ? f.height + 'p' : 'unknown'),
+                    format:   f.ext,
+                    size:     f.filesize ? (f.filesize / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown',
+                    formatId: f.format_id
+                }))
+                .filter(f => { if (seen.has(f.quality)) return false; seen.add(f.quality); return true; })
+                .slice(0, 8);
+            res.json({ title: info.title, thumbnail: info.thumbnail, platform: 'youtube', formats });
+        } catch (e) {
+            res.status(500).json({ error: 'Failed to parse video info' });
         }
-
-        exec(`${YT_DLP} -j "https://www.youtube.com/watch?v=${videoId}"`, (error, stdout) => {
-            if (error) {
-                return res.status(500).json({ error: 'Failed to fetch video info' });
-            }
-
-            try {
-                const info = JSON.parse(stdout);
-                const formats = [];
-
-                if (info.formats) {
-                    info.formats.forEach(format => {
-                        if (format.vcodec !== 'none' && format.acodec !== 'none') {
-                            formats.push({
-                                quality: format.format_note || format.height + 'p',
-                                format: format.ext,
-                                size: format.filesize ? (format.filesize / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown',
-                                formatId: format.format_id
-                            });
-                        }
-                    });
-                }
-
-                const uniqueFormats = [];
-                const seen = new Set();
-                formats.forEach(f => {
-                    if (!seen.has(f.quality)) {
-                        seen.add(f.quality);
-                        uniqueFormats.push(f);
-                    }
-                });
-
-                res.json({
-                    title: info.title,
-                    thumbnail: info.thumbnail,
-                    platform: 'youtube',
-                    formats: uniqueFormats.slice(0, 8)
-                });
-            } catch (e) {
-                res.status(500).json({ error: 'Failed to parse video info' });
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    });
 });
 
-// DOWNLOAD endpoint — streams the video file directly to the client
+// Download — streams mp4 directly to the browser
 app.get('/api/download', (req, res) => {
     const { url, quality, formatId } = req.query;
-
-    if (!url) {
-        return res.status(400).json({ error: 'No URL provided' });
-    }
-
+    if (!url) return res.status(400).json({ error: 'No URL provided' });
     const videoId = extractVideoId(url);
-    if (!videoId) {
-        return res.status(400).json({ error: 'Invalid YouTube URL' });
-    }
+    if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
 
-    // Unique temp filename to support concurrent requests
     const outputPath = path.join('/tmp', `${videoId}_${Date.now()}.mp4`);
-
-    // Prefer explicit formatId, otherwise map quality label → yt-dlp selector
-    const formatSelector = formatId
-        ? formatId
-        : qualityToFormat(quality);
-
+    const formatSelector = formatId || qualityToFormat(quality);
     const safeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const command = `${YT_DLP} -f "${formatSelector}" --merge-output-format mp4 -o "${outputPath}" "${safeUrl}"`;
 
-    console.log(`Downloading: ${command}`);
+    // --ffmpeg-location /tmp tells yt-dlp where to find our ffmpeg binary
+    const command = `${YT_DLP} --ffmpeg-location /tmp -f "${formatSelector}" --merge-output-format mp4 -o "${outputPath}" "${safeUrl}"`;
+    console.log('▶', command);
 
-    exec(command, { timeout: 300000 }, (error, stdout, stderr) => {
-        if (error) {
+    exec(command, { timeout: 300000 }, (err, _stdout, stderr) => {
+        if (err) {
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
             console.error('yt-dlp error:', stderr);
-            // Clean up partial file if present
-            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
             return res.status(500).json({ error: 'Failed to download video', detail: stderr });
         }
-
         if (!fs.existsSync(outputPath)) {
-            return res.status(500).json({ error: 'Output file not found after download' });
+            return res.status(500).json({ error: 'Output file missing after download' });
         }
 
-        const stat = fs.statSync(outputPath);
-        const safeTitle = `video_${videoId}_${quality || 'best'}.mp4`.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const stat     = fs.statSync(outputPath);
+        const filename = `video_${videoId}_${(quality || 'best').replace(/\W/g, '')}.mp4`;
 
         res.writeHead(200, {
-            'Content-Type': 'video/mp4',
-            'Content-Length': stat.size,
-            'Content-Disposition': `attachment; filename="${safeTitle}"`,
-            'Cache-Control': 'no-cache'
+            'Content-Type':        'video/mp4',
+            'Content-Length':      stat.size,
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'Cache-Control':       'no-cache'
         });
 
-        const readStream = fs.createReadStream(outputPath);
-        readStream.pipe(res);
-
-        readStream.on('close', () => {
-            try { fs.unlinkSync(outputPath); } catch (_) {}
-        });
-
-        res.on('error', () => {
-            try { fs.unlinkSync(outputPath); } catch (_) {}
-        });
+        const stream = fs.createReadStream(outputPath);
+        stream.pipe(res);
+        stream.on('close', () => { try { fs.unlinkSync(outputPath); } catch (_) {} });
+        res.on('error',    () => { try { fs.unlinkSync(outputPath); } catch (_) {} });
     });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

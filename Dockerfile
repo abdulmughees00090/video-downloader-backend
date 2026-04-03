@@ -1,12 +1,7 @@
-FROM node:18-slim
+FROM node:18
 
-# Install required packages (fixed)
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir yt-dlp
+# Install yt-dlp using npm (works every time)
+RUN npm install -g yt-dlp
 
 WORKDIR /app
 
